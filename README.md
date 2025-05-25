@@ -16,25 +16,25 @@ A Python tool for extracting text from documents and generating intelligent summ
 2. **Ollama installed and running**
 3. **phi3.5:3.8b model downloaded**
 
-### Install Ollama
+# Install Ollama
 
-# On macOS/Linux
+## On macOS/Linux
 curl -fsSL https://ollama.ai/install.sh | sh
 
-# On Windows
-# Download from https://ollama.ai/download
+## On Windows
+### Download from https://ollama.ai/download
 
-# Download the model
+### Download the model
 ollama pull phi3.5:3.8b
 
 
-### Create virtual environment
+# Create virtual environment
 python -m venv venv
-# On Windows
+### On Windows
 venv\Scripts\activate
-# On macOS/Linux
+### On macOS/Linux
 source venv/bin/activate
 
 
-### Install dependencies
+# Install dependencies
 pip install -r requirements.txt

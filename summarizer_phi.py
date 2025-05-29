@@ -36,32 +36,50 @@ except ImportError:
 import docx
 import pandas as pd
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
-# Initialize model with optimized settings for phi3.5:3.8b - OPTIMIZED FOR SMALLER MODEL
+# Initialize model with optimized settings for phi3.5:3.8b - OPTIMIZED FOR LENGTH CONTROL
 try:
     llm = Ollama(
         model="phi3.5:3.8b", 
-        temperature=0.3,  # Slightly higher for phi3.5 to improve creativity
+        temperature=0.2,  # Lower temperature for more consistent output
         **{
-            "num_predict": 2048,     # Reduced for smaller model efficiency
-            "top_k": 40,            # Increased for phi3.5 diversity
-            "top_p": 0.85,          # Optimal for phi3.5
-            "num_ctx": 4096,        # Reduced context for better performance
-            "repeat_penalty": 1.1,  # Lower for phi3.5 to avoid over-penalization
-            "stop": ["Human:", "Assistant:", "Q:", "A:", "###", "---"],  # Clear stop tokens for phi3.5
-            "num_thread": 4,        # Reduced for smaller model
-            "mirostat": 2,          # Enable mirostat for phi3.5 coherence
-            "mirostat_eta": 0.1,    # Fine-tune mirostat
-            "mirostat_tau": 5.0,    # Target perplexity
+            "num_predict": 1024,     # Reduced to prevent overly long responses
+            "top_k": 20,            # Reduced for more focused generation
+            "top_p": 0.8,           # Slightly lower for consistency
+            "num_ctx": 3072,        # Smaller context for faster processing
+            "repeat_penalty": 1.15, # Higher to avoid repetition
+            "stop": ["Human:", "Assistant:", "Q:", "A:", "###", "---", "\n\n\n"],  # More stop tokens
+            "num_thread": 4,        
+            "mirostat": 2,          
+            "mirostat_eta": 0.1,    
+            "mirostat_tau": 4.0,    # Lower target perplexity for consistency
         }
     )
 except Exception as e:
     print(f"Warning: Some Ollama parameters not supported. Using basic configuration: {e}")
-    llm = Ollama(model="phi3.5:3.8b", temperature=0.3)
+    llm = Ollama(model="phi3.5:3.8b", temperature=0.2)
 
 # Cache for processed documents to avoid reprocessing
 document_cache = {}
+
+def validate_num_sentences(num_sentences: Union[int, str]) -> int:
+    """Validate and convert num_sentences to integer with proper error handling"""
+    if isinstance(num_sentences, str):
+        # Check if the string is actually meant to be text content
+        if len(num_sentences) > 20 or not num_sentences.strip().isdigit():
+            print(f"Warning: Expected number but got text content: {num_sentences[:50]}...")
+            return 10  # Default fallback value
+        try:
+            return int(num_sentences.strip())
+        except ValueError:
+            print(f"Warning: Could not convert '{num_sentences}' to integer. Using default value 10.")
+            return 10
+    elif isinstance(num_sentences, (int, float)):
+        return int(num_sentences)
+    else:
+        print(f"Warning: Unexpected type for num_sentences: {type(num_sentences)}. Using default value 10.")
+        return 10
 
 def get_file_hash(file_path: str) -> str:
     """Generate a hash for the file to use as cache key"""
@@ -76,8 +94,8 @@ def get_file_hash(file_path: str) -> str:
 def get_text_splitter():
     """Cached text splitter - OPTIMIZED FOR PHI3.5"""
     return RecursiveCharacterTextSplitter(
-        chunk_size=600,      # Smaller chunks for phi3.5 processing
-        chunk_overlap=100,   # Reduced overlap for efficiency
+        chunk_size=500,      # Smaller chunks for faster processing
+        chunk_overlap=80,    # Reduced overlap for efficiency
         separators=["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""],
         length_function=len,
         keep_separator=True
@@ -187,19 +205,19 @@ def clean_extracted_text(text: str) -> str:
     
     return text.strip()
 
-def smart_chunk_text(text: str, max_chunks: int = 100) -> List[str]:
-    """OPTIMIZED: Intelligent chunking for phi3.5 - smaller max chunks"""
+def smart_chunk_text(text: str, max_chunks: int = 80) -> List[str]:
+    """OPTIMIZED: Intelligent chunking for phi3.5 - reduced max chunks"""
     splitter = get_text_splitter()
     initial_chunks = splitter.split_text(text)
     
     # If we have too many chunks, increase chunk size dynamically
     if len(initial_chunks) > max_chunks:
         # Calculate new chunk size to get closer to max_chunks
-        new_chunk_size = min(1200, int(len(text) / max_chunks * 1.1))  # Smaller for phi3.5
+        new_chunk_size = min(1000, int(len(text) / max_chunks * 1.1))
         
         dynamic_splitter = RecursiveCharacterTextSplitter(
             chunk_size=new_chunk_size,
-            chunk_overlap=150,  # Reduced overlap
+            chunk_overlap=120,
             separators=["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""],
             length_function=len,
             keep_separator=True
@@ -214,7 +232,7 @@ def smart_chunk_text(text: str, max_chunks: int = 100) -> List[str]:
         chunk = chunk.strip()
         
         # Skip very short chunks
-        if len(chunk) < 80:  # Slightly smaller threshold for phi3.5
+        if len(chunk) < 60:
             continue
             
         # Skip chunks that are mostly numbers or symbols
@@ -222,7 +240,7 @@ def smart_chunk_text(text: str, max_chunks: int = 100) -> List[str]:
             continue
             
         # Skip chunks that are mostly whitespace
-        if len(chunk.replace(' ', '').replace('\n', '').replace('\t', '')) < 40:  # Reduced threshold
+        if len(chunk.replace(' ', '').replace('\n', '').replace('\t', '')) < 30:
             continue
             
         quality_chunks.append(chunk)
@@ -230,90 +248,55 @@ def smart_chunk_text(text: str, max_chunks: int = 100) -> List[str]:
     return quality_chunks[:max_chunks]  # Ensure we don't exceed max
 
 class ImprovedEmbeddings(FakeEmbeddings):
-    """OPTIMIZED: Embeddings optimized for phi3.5 processing"""
+    """OPTIMIZED: Simplified embeddings for faster processing"""
     
-    def __init__(self, size=384):  # Smaller embedding size for phi3.5
+    def __init__(self, size=256):  # Even smaller embedding size
         super().__init__(size=size)
         self._cache = {}
-        # Pre-compute some common word vectors for better consistency
-        self._word_vectors = {}
-    
-    def _get_text_features(self, text: str) -> dict:
-        """Extract features from text for better embeddings"""
-        features = {
-            'length': len(text),
-            'word_count': len(text.split()),
-            'sentence_count': len(re.findall(r'[.!?]+', text)),
-            'paragraph_count': len(text.split('\n\n')),
-            'avg_word_length': np.mean([len(word) for word in text.split()]) if text.split() else 0,
-            'uppercase_ratio': sum(1 for c in text if c.isupper()) / len(text) if text else 0,
-            'digit_ratio': sum(1 for c in text if c.isdigit()) / len(text) if text else 0,
-        }
-        return features
     
     def _get_embedding(self, text: str) -> np.ndarray:
-        """Generate more sophisticated embedding for text with caching"""
-        # Use first 200 chars for hashing for phi3.5 efficiency
-        text_hash = hashlib.md5(text[:200].encode()).hexdigest()
+        """Generate simplified embedding for text with caching"""
+        # Use first 150 chars for hashing for efficiency
+        text_hash = hashlib.md5(text[:150].encode()).hexdigest()
         
         if text_hash in self._cache:
             return self._cache[text_hash]
         
-        # Get text features
-        features = self._get_text_features(text)
-        
-        # Create base embedding from multiple hash seeds
+        # Simplified embedding generation
         embedding = np.zeros(self.size, dtype=np.float32)
         
-        # Use different parts of text for different embedding dimensions
-        text_parts = [
-            text[:len(text)//3],      # Beginning
-            text[len(text)//3:2*len(text)//3],  # Middle
-            text[2*len(text)//3:],    # End
-            ' '.join(text.split()[:8]),   # First 8 words (reduced for phi3.5)
-            ' '.join(text.split()[-8:]),  # Last 8 words
-        ]
+        # Use text characteristics for embedding
+        words = text.lower().split()[:20]  # Only first 20 words
+        for i, word in enumerate(words):
+            if i >= self.size // 4:
+                break
+            seed = sum(ord(c) for c in word) % (2**32)
+            np.random.seed(seed)
+            start_idx = i * 4
+            end_idx = min(start_idx + 4, self.size)
+            embedding[start_idx:end_idx] = np.random.rand(end_idx - start_idx)
         
-        for i, part in enumerate(text_parts):
-            if part:
-                seed = sum(ord(c) for c in part) % (2**32)
-                np.random.seed(seed)
-                start_idx = i * (self.size // len(text_parts))
-                end_idx = (i + 1) * (self.size // len(text_parts))
-                embedding[start_idx:end_idx] = np.random.rand(end_idx - start_idx)
-        
-        # Incorporate text features into embedding
-        feature_vector = np.array([
-            features['length'] / 1000.0,
-            features['word_count'] / 100.0,
-            features['sentence_count'] / 10.0,
-            features['avg_word_length'] / 10.0,
-            features['uppercase_ratio'],
-            features['digit_ratio']
-        ])
-        
-        # Blend feature vector into embedding
-        embedding[:len(feature_vector)] += feature_vector * 0.1
+        # Add text statistics
+        if len(text) > 0:
+            embedding[-4:] = [
+                len(text) / 1000.0,
+                len(words) / 50.0,
+                text.count('.') / 10.0,
+                sum(c.isupper() for c in text) / len(text)
+            ]
         
         # Normalize
         embedding = embedding / (np.linalg.norm(embedding) + 1e-8)
         
         # Cache result (with size limit)
-        if len(self._cache) < 300:  # Smaller cache for phi3.5
+        if len(self._cache) < 200:
             self._cache[text_hash] = embedding
             
         return embedding
     
     def embed_documents(self, texts: List[str]) -> List[np.ndarray]:
-        """Batch embed documents with threading for speed"""
-        if len(texts) < 15:  # Lower threshold for phi3.5
-            return [self._get_embedding(text) for text in texts]
-        
-        # For larger batches, use threading with fewer workers
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            embeddings = list(executor.map(self._get_embedding, texts))
-        
-        return embeddings
+        """Batch embed documents - simplified"""
+        return [self._get_embedding(text) for text in texts]
     
     def embed_query(self, text: str) -> np.ndarray:
         return self._get_embedding(text)
@@ -322,7 +305,7 @@ def create_vectorstore_optimized(chunks: List[str]) -> Tuple[FAISS, List[str]]:
     """OPTIMIZED: Create vectorstore with better chunk selection for phi3.5"""
     try:
         # Better chunk selection strategy - smaller limit for phi3.5
-        if len(chunks) > 100:
+        if len(chunks) > 60:  # Reduced from 100
             # Score chunks by information density
             scored_chunks = []
             for i, chunk in enumerate(chunks):
@@ -331,7 +314,7 @@ def create_vectorstore_optimized(chunks: List[str]) -> Tuple[FAISS, List[str]]:
             
             # Sort by score and take top chunks
             scored_chunks.sort(reverse=True, key=lambda x: x[0])
-            chunks = [chunk for _, chunk in scored_chunks[:100]]
+            chunks = [chunk for _, chunk in scored_chunks[:60]]
         
         embedder = ImprovedEmbeddings()
         vectorstore = FAISS.from_texts(chunks, embedder)
@@ -346,38 +329,29 @@ def calculate_chunk_importance(chunk: str, position: int, total_chunks: int) -> 
     score = 0.0
     
     # Length score (prefer substantial chunks)
-    length_score = min(len(chunk) / 800.0, 1.0)  # Adjusted for smaller chunks
-    score += length_score * 0.3
+    length_score = min(len(chunk) / 600.0, 1.0)
+    score += length_score * 0.4
     
     # Position score (prefer chunks from beginning and end)
-    if position < total_chunks * 0.2 or position > total_chunks * 0.8:
-        score += 0.2
+    if position < total_chunks * 0.25 or position > total_chunks * 0.75:
+        score += 0.3
     
     # Content quality score
     word_count = len(chunk.split())
-    if word_count > 40:  # Reduced threshold for phi3.5
+    if word_count > 30:
         score += 0.3
-    
-    # Information density (prefer chunks with varied vocabulary)
-    unique_words = len(set(chunk.lower().split()))
-    if word_count > 0:
-        density = unique_words / word_count
-        score += density * 0.2
     
     return score
 
 def build_improved_qa_chain(llm, vectorstore):
-    """OPTIMIZED: Build QA system with phi3.5-optimized prompt template"""
+    """OPTIMIZED: Build QA system with strict length control"""
     
-    # Custom prompt template optimized for phi3.5
-    prompt_template = """Use the context below to answer the question accurately and concisely.
-
-Context:
-{context}
+    # Simplified prompt template with strict length control
+    prompt_template = """Context: {context}
 
 Question: {question}
 
-Answer the question using only information from the context. Be specific and include important details like numbers, dates, and requirements. If the context doesn't have enough information, say so clearly.
+Instructions: Answer using ONLY the context above. Be concise and factual.
 
 Answer:"""
 
@@ -387,9 +361,9 @@ Answer:"""
     )
     
     retriever = vectorstore.as_retriever(
-        search_type="similarity",  # Simpler search for phi3.5
+        search_type="similarity",
         search_kwargs={
-            "k": 6,  # Retrieve fewer documents for phi3.5 efficiency
+            "k": 4,  # Retrieve even fewer documents for efficiency
         }
     )
     
@@ -407,215 +381,162 @@ Answer:"""
     
     return qa_function
 
-def count_sentences_improved(text: str) -> int:
-    """IMPROVED: More accurate sentence counting"""
-    # Clean the text first
+def count_sentences_fast(text: str) -> int:
+    """FAST: Quick sentence counting"""
+    # Simple but effective sentence counting
     text = text.strip()
+    if not text:
+        return 0
     
-    # Handle common abbreviations by replacing them temporarily
-    abbreviations = ['Mr.', 'Mrs.', 'Dr.', 'Prof.', 'Sr.', 'Jr.', 'vs.', 'etc.', 'i.e.', 'e.g.']
-    temp_text = text
-    for i, abbr in enumerate(abbreviations):
-        temp_text = temp_text.replace(abbr, f'ABBREV{i}')
-    
-    # Split on sentence endings
-    sentences = re.split(r'[.!?]+\s+', temp_text)
-    
-    # Restore abbreviations and filter valid sentences
-    valid_sentences = []
-    for sentence in sentences:
-        sentence = sentence.strip()
-        
-        # Restore abbreviations
-        for i, abbr in enumerate(abbreviations):
-            sentence = sentence.replace(f'ABBREV{i}', abbr)
-        
-        # Must have at least 8 characters and 2 words (more lenient for phi3.5)
-        if len(sentence) >= 8 and len(sentence.split()) >= 2:
-            valid_sentences.append(sentence)
+    # Count sentence endings
+    sentences = re.split(r'[.!?]+\s+', text)
+    valid_sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 5]
     
     return len(valid_sentences)
 
-def create_comprehensive_summary_prompt(num_sentences: int, doc_type: str = "document") -> str:
-    """OPTIMIZED: Create phi3.5-friendly prompt based on requested sentence count"""
+def create_length_controlled_prompt(num_sentences: Union[int, str]) -> str:
+    """Create prompt with strict length control"""
     
-    if num_sentences <= 5:
-        detail_level = "brief summary"
-        instruction = "Focus on the most important points"
-    elif num_sentences <= 15:
-        detail_level = "comprehensive summary"
-        instruction = "Include key details and important information"
+    # Validate and convert num_sentences
+    num_sentences = validate_num_sentences(num_sentences)
+    
+    # Different strategies based on sentence count
+    if num_sentences <= 3:
+        instruction = "Write exactly 3 short, key sentences"
+    elif num_sentences <= 7:
+        instruction = f"Write exactly {num_sentences} sentences. Each sentence should be 15-25 words"
     else:
-        detail_level = "detailed summary"
-        instruction = "Provide thorough analysis with specific details"
+        instruction = f"Write exactly {num_sentences} sentences. Mix short (10-15 words) and longer (20-30 words) sentences"
     
-    prompt = f"""Create a {detail_level} of this {doc_type} using exactly {num_sentences} sentences.
+    prompt = f"""Summarize the key information in exactly {num_sentences} sentences.
 
-Requirements:
-- Write exactly {num_sentences} complete sentences
-- Each sentence should be informative and substantial
-- Include specific facts, numbers, dates, and requirements when available
-- Use clear, professional language
-- {instruction}
+CRITICAL RULES:
+1. Write EXACTLY {num_sentences} sentences - no more, no less
+2. {instruction}
+3. Each sentence must end with a period
+4. Number your sentences: 1. 2. 3. etc.
+5. Focus on the most important facts and details
 
-Write your {num_sentences}-sentence summary:"""
+Write your numbered {num_sentences} sentences:"""
 
     return prompt
 
-def progressive_summarize_improved(qa_function, text: str, num_sentences: int = 10, include_header: bool = True) -> str:
-    """OPTIMIZED: Progressive summarization optimized for phi3.5"""
+def fast_summarize(qa_function, num_sentences: Union[int, str] = 10, include_header: bool = True) -> str:
+    """FAST: Single-attempt summarization with strict length control"""
     
-    # Strategy 1: Try direct approach first
-    prompt = create_comprehensive_summary_prompt(num_sentences)
+    # Validate and convert num_sentences
+    num_sentences = validate_num_sentences(num_sentences)
     
-    max_attempts = 2  # Reduced attempts for phi3.5 efficiency
-    best_summary = ""
-    best_sentence_count = 0
-    
-    for attempt in range(max_attempts):
-        try:
-            # Generate summary
-            raw_summary = qa_function(prompt)
-            
-            # Clean and process the summary
-            processed_summary = clean_and_validate_summary(raw_summary, num_sentences)
-            sentence_count = count_sentences_improved(processed_summary)
-            
-            # Check if this is our best attempt so far
-            if abs(sentence_count - num_sentences) < abs(best_sentence_count - num_sentences):
-                best_summary = processed_summary
-                best_sentence_count = sentence_count
-            
-            # If we got close enough, use it - more lenient for phi3.5
-            if abs(sentence_count - num_sentences) <= 3:
-                break
-                
-            # Modify prompt for next attempt
-            if sentence_count < num_sentences:
-                prompt = f"""Write exactly {num_sentences} sentences. Count as you write.
-
-{prompt}
-
-Remember: Write {num_sentences} sentences, no more, no less."""
-            else:
-                prompt = f"""You wrote too many sentences. Write exactly {num_sentences} sentences.
-
-{prompt}
-
-Stop after {num_sentences} sentences."""
-                
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
-            continue
-    
-    # If we still don't have enough sentences, try supplemental approach
-    if best_sentence_count < num_sentences * 0.7:  # More lenient threshold
-        best_summary = supplement_summary(qa_function, best_summary, num_sentences, text)
-    
-    # Format final output
-    if include_header:
-        header = f"## Summary ({num_sentences} Key Points)\n\n"
-        return header + best_summary
-    
-    return best_summary
-
-def clean_and_validate_summary(raw_summary: str, target_sentences: int) -> str:
-    """OPTIMIZED: Cleaning and validation optimized for phi3.5 output"""
-    
-    # Remove common prefixes - simpler patterns for phi3.5
-    prefixes_to_remove = [
-        r'^(?:Here is|This is|The following is).*?summary.*?:?\s*',
-        r'^(?:Summary|Overview).*?:?\s*',
-    ]
-    
-    cleaned = raw_summary.strip()
-    for pattern in prefixes_to_remove:
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-    
-    # Handle abbreviations by replacing them temporarily
-    abbreviations = ['Mr.', 'Mrs.', 'Dr.', 'Prof.', 'Sr.', 'Jr.', 'vs.', 'etc.', 'i.e.', 'e.g.']
-    temp_cleaned = cleaned
-    for i, abbr in enumerate(abbreviations):
-        temp_cleaned = temp_cleaned.replace(abbr, f'ABBREV{i}')
-    
-    # Split into sentences more carefully
-    sentence_parts = re.split(r'([.!?])\s+', temp_cleaned)
-    
-    sentences = []
-    i = 0
-    while i < len(sentence_parts):
-        if i + 1 < len(sentence_parts) and sentence_parts[i+1] in '.!?':
-            # Combine sentence with its punctuation
-            sentence = (sentence_parts[i] + sentence_parts[i+1]).strip()
-            i += 2
-        else:
-            sentence = sentence_parts[i].strip()
-            i += 1
-        
-        # Restore abbreviations
-        for j, abbr in enumerate(abbreviations):
-            sentence = sentence.replace(f'ABBREV{j}', abbr)
-        
-        # More lenient filtering for phi3.5
-        if len(sentence) >= 10 and len(sentence.split()) >= 3:
-            # Ensure proper capitalization
-            if sentence and sentence[0].islower():
-                sentence = sentence[0].upper() + sentence[1:]
-            
-            # Ensure proper ending punctuation
-            if sentence and not sentence.endswith(('.', '!', '?')):
-                sentence += '.'
-                
-            sentences.append(sentence)
-    
-    # Join sentences with proper spacing
-    return ' '.join(sentences)
-
-def supplement_summary(qa_function, existing_summary: str, target_sentences: int, full_text: str) -> str:
-    """Add additional sentences if the summary is too short"""
-    
-    current_count = count_sentences_improved(existing_summary)
-    needed = target_sentences - current_count
-    
-    if needed <= 0:
-        return existing_summary
-    
-    # Ask for additional specific information - simplified for phi3.5
-    supplement_prompt = f"""Add {needed} more sentences to complete the summary.
-
-Current summary: {existing_summary}
-
-Write {needed} additional sentences with important details not mentioned above:"""
+    prompt = create_length_controlled_prompt(num_sentences)
     
     try:
-        additional_content = qa_function(supplement_prompt)
-        additional_sentences = clean_and_validate_summary(additional_content, needed)
+        # Single generation attempt
+        raw_summary = qa_function(prompt)
         
-        if additional_sentences:
-            return existing_summary + ' ' + additional_sentences
-    except:
-        pass
-    
-    return existing_summary
+        # Extract numbered sentences
+        processed_summary = extract_numbered_sentences(raw_summary, num_sentences)
+        
+        # Validate and adjust if needed
+        sentence_count = count_sentences_fast(processed_summary)
+        
+        # If we're off by a lot, try a quick fix
+        if abs(sentence_count - num_sentences) > 2:
+            processed_summary = quick_length_fix(processed_summary, num_sentences)
+        
+        if include_header:
+            header = f"## Summary ({num_sentences} Key Points)\n\n"
+            return header + processed_summary
+        
+        return processed_summary
+        
+    except Exception as e:
+        return f"Error in summarization: {str(e)}"
 
-# Alternative direct summarization function - OPTIMIZED FOR PHI3.5
-def direct_summarize_improved(text: str, num_sentences: int = 10, include_header: bool = True) -> str:
-    """OPTIMIZED: Direct summarization for phi3.5"""
+def extract_numbered_sentences(text: str, target_count: Union[int, str]) -> str:
+    """Extract numbered sentences from the response"""
     
-    # Truncate very long texts intelligently - smaller limit for phi3.5
-    max_chars = 8000  # Reduced for phi3.5 context limits
+    # Validate and convert target_count
+    target_count = validate_num_sentences(target_count)
+    
+    # Look for numbered sentences
+    numbered_pattern = r'(\d+\.)\s*([^.!?]*[.!?])'
+    matches = re.findall(numbered_pattern, text)
+    
+    if matches and len(matches) >= target_count * 0.7:  # If we found reasonable numbered sentences
+        sentences = []
+        for i, (num, sentence) in enumerate(matches[:target_count]):
+            sentence = sentence.strip()
+            if sentence and not sentence.endswith(('.', '!', '?')):
+                sentence += '.'
+            sentences.append(sentence)
+        return ' '.join(sentences)
+    
+    # Fallback: extract regular sentences
+    return extract_regular_sentences(text, target_count)
+
+def extract_regular_sentences(text: str, target_count: Union[int, str]) -> str:
+    """Extract regular sentences when numbered format fails"""
+    
+    # Validate and convert target_count
+    target_count = validate_num_sentences(target_count)
+    
+    # Clean the text
+    text = re.sub(r'^(Here is|This is|The following).*?summary.*?:?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\d+\.\s*', '', text, flags=re.MULTILINE)  # Remove numbering
+    
+    # Split into sentences
+    sentences = re.split(r'[.!?]+\s+', text.strip())
+    
+    # Filter and clean sentences
+    clean_sentences = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if len(sentence) > 10 and len(sentence.split()) > 3:
+            if not sentence.endswith(('.', '!', '?')):
+                sentence += '.'
+            clean_sentences.append(sentence)
+    
+    # Take the target number of sentences
+    return ' '.join(clean_sentences[:target_count])
+
+def quick_length_fix(summary: str, target_sentences: Union[int, str]) -> str:
+    """Quick fix for length issues"""
+    
+    # Validate and convert target_sentences
+    target_sentences = validate_num_sentences(target_sentences)
+    
+    current_sentences = count_sentences_fast(summary)
+    
+    if current_sentences > target_sentences:
+        # Truncate to target length
+        sentences = re.split(r'[.!?]+\s+', summary.strip())
+        return ' '.join(sentences[:target_sentences]) + '.'
+    
+    elif current_sentences < target_sentences and current_sentences > 0:
+        # For now, just return what we have rather than trying to expand
+        return summary
+    
+    return summary
+
+# Direct summarization function - FAST VERSION
+def direct_summarize_fast(text: str, num_sentences: Union[int, str] = 10, include_header: bool = True) -> str:
+    """FAST: Direct summarization optimized for speed and length control"""
+    
+    # Validate and convert num_sentences
+    num_sentences = validate_num_sentences(num_sentences)
+    
+    # Truncate very long texts more aggressively
+    max_chars = 6000  # Reduced for faster processing
     if len(text) > max_chars:
-        # Take strategic portions: beginning and end
-        half = len(text) // 2
-        truncated = text[:max_chars//2] + "\n\n[...content continues...]\n\n" + text[-max_chars//2:]
-        text = truncated
+        # Take just the beginning and a bit from the end
+        text = text[:max_chars//2] + "\n\n" + text[-max_chars//4:]
     
-    prompt = create_comprehensive_summary_prompt(num_sentences, "content")
-    full_prompt = f"{prompt}\n\nContent:\n{text}\n\nYour {num_sentences}-sentence summary:"
+    prompt = create_length_controlled_prompt(num_sentences)
+    full_prompt = f"{prompt}\n\nContent to summarize:\n{text}\n\nYour numbered {num_sentences} sentences:"
     
     try:
         raw_summary = llm(full_prompt)
-        processed_summary = clean_and_validate_summary(raw_summary, num_sentences)
+        processed_summary = extract_numbered_sentences(raw_summary, num_sentences)
         
         if include_header:
             header = f"## Summary ({num_sentences} Key Points)\n\n"
@@ -628,9 +549,9 @@ def direct_summarize_improved(text: str, num_sentences: int = 10, include_header
 def cleanup_resources():
     """Clean up resources and cache"""
     global document_cache
-    if len(document_cache) > 3:  # Keep fewer documents for phi3.5
+    if len(document_cache) > 2:  # Keep even fewer documents
         # Remove oldest entries
-        keys_to_remove = list(document_cache.keys())[:-3]
+        keys_to_remove = list(document_cache.keys())[:-2]
         for key in keys_to_remove:
             del document_cache[key]
     
@@ -641,22 +562,26 @@ extract_text = extract_text_optimized
 chunk_text = smart_chunk_text  
 embed_chunks = create_vectorstore_optimized
 build_rag_qa = build_improved_qa_chain
-summarize = progressive_summarize_improved
+summarize = fast_summarize
 
-# Additional utility function for testing different approaches
-def compare_summarization_methods(text: str, num_sentences: int = 10):
-    """Compare different summarization approaches"""
+# Simplified comparison function
+def compare_summarization_methods(text: str, num_sentences: Union[int, str] = 10):
+    """Compare different summarization approaches - simplified"""
+    
+    # Validate and convert num_sentences
+    num_sentences = validate_num_sentences(num_sentences)
+    
     print("Testing Direct Summarization...")
-    direct_result = direct_summarize_improved(text, num_sentences, include_header=False)
-    direct_count = count_sentences_improved(direct_result)
+    direct_result = direct_summarize_fast(text, num_sentences, include_header=False)
+    direct_count = count_sentences_fast(direct_result)
     
     print("Testing RAG Summarization...")
     try:
         chunks = chunk_text(text)
         vectorstore, selected_chunks = embed_chunks(chunks) 
         qa_function = build_rag_qa(llm, vectorstore)
-        rag_result = summarize(qa_function, text, num_sentences, include_header=False)
-        rag_count = count_sentences_improved(rag_result)
+        rag_result = summarize(qa_function, num_sentences, include_header=False)
+        rag_count = count_sentences_fast(rag_result)
         
         print(f"\nDirect Method - Sentences: {direct_count}/{num_sentences}")
         print(f"RAG Method - Sentences: {rag_count}/{num_sentences}")
@@ -666,3 +591,46 @@ def compare_summarization_methods(text: str, num_sentences: int = 10):
     except Exception as e:
         print(f"RAG method failed: {e}")
         print(f"\nDirect Result ({direct_count} sentences):\n{direct_result}")
+
+# Additional utility for precise length control
+def generate_exact_length_summary(text: str, num_sentences: Union[int, str], method: str = "direct") -> str:
+    """Generate summary with exact sentence count"""
+    
+    # Validate and convert num_sentences
+    num_sentences = validate_num_sentences(num_sentences)
+    
+    if method == "direct":
+        result = direct_summarize_fast(text, num_sentences, include_header=False)
+    else:
+        try:
+            chunks = chunk_text(text)
+            vectorstore, _ = embed_chunks(chunks)
+            qa_function = build_rag_qa(llm, vectorstore)
+            result = summarize(qa_function, num_sentences, include_header=False)
+        except Exception as e:
+            # Fallback to direct method
+            result = direct_summarize_fast(text, num_sentences, include_header=False)
+    
+    # Final length check and adjustment
+    current_count = count_sentences_fast(result)
+    if current_count != num_sentences:
+        print(f"Warning: Generated {current_count} sentences instead of {num_sentences}")
+    
+    return result
+
+# Safe wrapper functions for backward compatibility
+def safe_summarize(qa_function, num_sentences=10, include_header=True):
+    """Safe wrapper for summarize function"""
+    try:
+        return fast_summarize(qa_function, num_sentences, include_header)
+    except Exception as e:
+        print(f"Error in summarization: {e}")
+        return f"Error: Could not generate summary. {str(e)}"
+
+def safe_direct_summarize(text, num_sentences=10, include_header=True):
+    """Safe wrapper for direct summarization"""
+    try:
+        return direct_summarize_fast(text, num_sentences, include_header)
+    except Exception as e:
+        print(f"Error in direct summarization: {e}")
+        return f"Error: Could not generate summary. {str(e)}"
